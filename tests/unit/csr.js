@@ -1,4 +1,5 @@
 var ASSERT = require('assert');
+var ASN1 = require('../../lib/asn1');
 var PKI = require('../../lib/pki');
 
 (function() {
@@ -124,6 +125,50 @@ var PKI = require('../../lib/pki');
       ASSERT.equal(csr.publicKey.e.toString(16), '10001');
       ASSERT.equal(csr.publicKey.n.toString(16).toUpperCase(), 'A454CEB00C6E28928C06189773D6B0EACDC18D15B5E9A0459734B7BFB71655A9D5EF2E200DCAC5915963CEF9C28D103AF0FE01D36FE7E627A248333A2F371774F8C9EC01491D1388EDCF6B8B4BE02EC2CD69E1625882FE8C24E5B1C25741CB91851617ACFB2F1DC7CA1A3194A9AB1F24923CF6512CAA7B29CC316E315CD847E1415DB523BDD9D66086E8C129EDC376A816D03F238C36301489B396B3824911D5235A19BCE84666F7EA9F8292F9B65A5909EFA45F24AB293A79EA632C7D2390BE5A25A513BCA4FF40523684A918A4099EF8E48FFD5BB74734F528CB19165798D10F0713EECEB9DBE2FAA31B68A95397A60DBCB802F491465031AF3091850A6623');
       ASSERT.ok(csr.verify());
+    });
+
+    it('round-trips a non-ASCII subject through a CSR', function() {
+      var keys = {
+        privateKey: PKI.privateKeyFromPem(_pem.privateKey),
+        publicKey: PKI.publicKeyFromPem(_pem.publicKey)
+      };
+      var attrs = [{
+        name: 'commonName',
+        value: '示例公司.中国'
+      }, {
+        name: 'countryName',
+        value: 'CN'
+      }, {
+        name: 'organizationName',
+        value: '测试组织'
+      }];
+
+      var csr = PKI.createCertificationRequest();
+      csr.publicKey = keys.publicKey;
+      csr.setSubject(attrs);
+      csr.sign(keys.privateKey);
+
+      var parsed = PKI.certificationRequestFromPem(
+        PKI.certificationRequestToPem(csr));
+      ASSERT.ok(parsed.verify());
+      ASSERT.equal(parsed.subject.attributes.length, attrs.length);
+      for(var i = 0; i < attrs.length; ++i) {
+        ASSERT.equal(parsed.subject.attributes[i].value, attrs[i].value);
+      }
+      ASSERT.equal(
+        parsed.subject.attributes[0].valueTagClass, ASN1.Type.UTF8);
+
+      // re-issue a CSR from the parsed attributes
+      var again = PKI.createCertificationRequest();
+      again.publicKey = keys.publicKey;
+      again.setSubject(parsed.subject.attributes);
+      again.sign(keys.privateKey);
+      var againParsed = PKI.certificationRequestFromPem(
+        PKI.certificationRequestToPem(again));
+      ASSERT.equal(
+        againParsed.subject.attributes[0].value, '示例公司.中国');
+      ASSERT.equal(
+        againParsed.subject.attributes[2].value, '测试组织');
     });
   });
 })();

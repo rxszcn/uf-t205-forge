@@ -2921,4 +2921,200 @@ var UTIL = require('../../lib/util');
 
     return PKI.verifyCertificateChain(PKI.createCaStore([rootCert]), chain);
   }
+
+  // gets the ASN.1 string type (tag) of the first subject attribute with
+  // the given OID in a certificate
+  function _subjectAttrType(cert, oid) {
+    var certAsn1 = PKI.certificateToAsn1(cert);
+    // TBSCertificate.subject is index 5 of the TBSCertificate sequence
+    var rdnSequence = certAsn1.value[0].value[5];
+    for(var si = 0; si < rdnSequence.value.length; ++si) {
+      var atv = rdnSequence.value[si].value[0];
+      var attrOid = ASN1.derToOid(atv.value[0].value);
+      if(attrOid === oid) {
+        return atv.value[1].type;
+      }
+    }
+    return null;
+  }
+
+  describe('distinguished name string encoding', function() {
+    var keys;
+
+    before(function() {
+      keys = {
+        privateKey: PKI.privateKeyFromPem(_pem.privateKey),
+        publicKey: PKI.publicKeyFromPem(_pem.publicKey)
+      };
+    });
+
+    // creates and self-signs a certificate carrying the given subject and
+    // issuer attributes
+    function _createCert(attrs) {
+      var cert = PKI.createCertificate();
+      cert.publicKey = keys.publicKey;
+      cert.serialNumber = '01';
+      cert.validity.notBefore = new Date();
+      cert.validity.notAfter = new Date(
+        cert.validity.notBefore.getTime() + 86400000);
+      cert.setSubject(attrs);
+      cert.setIssuer(attrs);
+      cert.sign(keys.privateKey);
+      return cert;
+    }
+
+    it('defaults non-ASCII values to UTF8String and ASCII to PrintableString',
+      function() {
+        var cert = _createCert([{
+          name: 'commonName',
+          value: '示例公司.中国'
+        }, {
+          name: 'countryName',
+          value: 'CN'
+        }, {
+          name: 'organizationName',
+          value: 'Test 测试'
+        }]);
+
+        ASSERT.equal(
+          _subjectAttrType(cert, PKI.oids.commonName), ASN1.Type.UTF8);
+        ASSERT.equal(
+          _subjectAttrType(cert, PKI.oids.countryName),
+          ASN1.Type.PRINTABLESTRING);
+        ASSERT.equal(
+          _subjectAttrType(cert, PKI.oids.organizationName), ASN1.Type.UTF8);
+
+        // the produced DER must parse cleanly (no truncated value errors)
+        var der = ASN1.toDer(PKI.certificateToAsn1(cert)).getBytes();
+        ASSERT.doesNotThrow(function() {
+          ASN1.fromDer(der);
+        });
+      });
+
+    it('round-trips a non-ASCII subject through certificate PEM', function() {
+      var attrs = [{
+        name: 'commonName',
+        value: '示例公司.中国'
+      }, {
+        name: 'countryName',
+        value: 'CN'
+      }, {
+        name: 'localityName',
+        value: '北京'
+      }, {
+        name: 'organizationName',
+        value: '测试组织'
+      }, {
+        name: 'organizationalUnitName',
+        value: '研发部'
+      }];
+      var cert = _createCert(attrs);
+
+      var parsed = PKI.certificateFromPem(PKI.certificateToPem(cert));
+      ASSERT.equal(parsed.subject.attributes.length, attrs.length);
+      for(var i = 0; i < attrs.length; ++i) {
+        ASSERT.equal(parsed.subject.attributes[i].value, attrs[i].value);
+      }
+      // the issuer shares the same attributes
+      ASSERT.equal(
+        parsed.issuer.attributes[0].value, '示例公司.中国');
+      // UTF8String values are decoded back into JavaScript strings
+      ASSERT.equal(
+        parsed.subject.attributes[0].valueTagClass, ASN1.Type.UTF8);
+    });
+
+    it('keeps the subject name stable when parsed attributes are re-issued',
+      function() {
+        var attrs = [{
+          name: 'commonName',
+          value: '示例公司.中国'
+        }, {
+          name: 'countryName',
+          value: 'CN'
+        }, {
+          name: 'organizationName',
+          value: '测试组织'
+        }];
+        var first = PKI.certificateFromPem(
+          PKI.certificateToPem(_createCert(attrs)));
+
+        // feed the parsed attributes straight back into a new certificate
+        var second = _createCert(first.subject.attributes);
+        var secondParsed = PKI.certificateFromPem(
+          PKI.certificateToPem(second));
+
+        var firstValues = first.subject.attributes.map(function(a) {
+          return a.value;
+        });
+        var secondValues = secondParsed.subject.attributes.map(function(a) {
+          return a.value;
+        });
+        ASSERT.deepEqual(secondValues, firstValues);
+        ASSERT.equal(
+          secondParsed.subject.attributes[0].value, '示例公司.中国');
+
+        // re-issuing parsed attributes must reproduce the same DER
+        // encoding of the subject
+        ASSERT.equal(
+          ASN1.toDer(PKI.certificateToAsn1(first).value[0].value[5])
+            .getBytes(),
+          ASN1.toDer(PKI.certificateToAsn1(secondParsed).value[0].value[5])
+            .getBytes());
+      });
+
+    it('honors an explicit UTF8String valueTagClass', function() {
+      var cert = _createCert([{
+        name: 'commonName',
+        value: 'example.org',
+        valueTagClass: ASN1.Type.UTF8
+      }, {
+        name: 'countryName',
+        value: 'US'
+      }]);
+
+      ASSERT.equal(
+        _subjectAttrType(cert, PKI.oids.commonName), ASN1.Type.UTF8);
+      var parsed = PKI.certificateFromPem(PKI.certificateToPem(cert));
+      ASSERT.equal(parsed.subject.attributes[0].value, 'example.org');
+      ASSERT.equal(
+        parsed.subject.attributes[0].valueTagClass, ASN1.Type.UTF8);
+    });
+
+    it('encodes and parses an explicit BMPString subject attribute',
+      function() {
+        var cert = _createCert([{
+          name: 'commonName',
+          value: '示例公司',
+          valueTagClass: ASN1.Type.BMPSTRING
+        }]);
+
+        ASSERT.equal(
+          _subjectAttrType(cert, PKI.oids.commonName), ASN1.Type.BMPSTRING);
+        var parsed = PKI.certificateFromPem(PKI.certificateToPem(cert));
+        ASSERT.equal(parsed.subject.attributes[0].value, '示例公司');
+        ASSERT.equal(
+          parsed.subject.attributes[0].valueTagClass, ASN1.Type.BMPSTRING);
+
+        // round-trip the parsed BMPString attribute once more
+        var again = PKI.certificateFromPem(
+          PKI.certificateToPem(_createCert(parsed.subject.attributes)));
+        ASSERT.equal(again.subject.attributes[0].value, '示例公司');
+        ASSERT.equal(
+          again.subject.attributes[0].valueTagClass, ASN1.Type.BMPSTRING);
+      });
+
+    it('still selects PrintableString for punctuation-only ASCII values',
+      function() {
+        var value = 'Test Co., Inc. (HQ) - A/B? C=D: E+F';
+        var cert = _createCert([{
+          name: 'organizationName',
+          value: value
+        }]);
+        ASSERT.equal(
+          _subjectAttrType(cert, PKI.oids.organizationName),
+          ASN1.Type.PRINTABLESTRING);
+        var parsed = PKI.certificateFromPem(PKI.certificateToPem(cert));
+        ASSERT.equal(parsed.subject.attributes[0].value, value);
+      });
+  });
 })();
